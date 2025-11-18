@@ -1,0 +1,81 @@
+# Shield Protection Configuration
+server:
+  listen_address: "0.0.0.0:25565"
+  backend_address: "127.0.0.1:25566"
+  read_timeout: 30s
+  write_timeout: 30s
+  max_connections: 10000
+
+database:
+  host: "127.0.0.1"
+  port: 3306
+  username: "shield"
+  password: "shield_password"
+  database: "shield"
+
+haproxy:
+  enabled: true
+  proxy_protocol_v2: true
+  trusted_proxies:
+    - "127.0.0.1"
+    - "10.0.0.0/8"
+
+router:
+  enabled: true
+  port_ranges:
+    - start: 25600
+      end: 25699
+    - start: 30000
+      end: 30099
+  haproxy_config_path: "./haproxy/haproxy_dynamic.cfg"
+  haproxy_binary_path: "/opt/homebrew/bin/haproxy"  # Для macOS с Homebrew
+  haproxy_socket_path: "./haproxy/haproxy.sock"
+  auto_reload: false
+  reload_interval: 10
+
+
+motd:
+  enabled: true
+  description: "§6Protected by Shield §8| §7Online"
+  version_name: "Shield 1.20.1"
+  max_players: 1000
+  online_players: 0
+  favicon: ""
+
+antiforge:
+  enabled: true
+  strict_mode: true
+  check_hostname: true
+  allowed_domains:
+    - "your-domain.com"
+
+filter:
+  enabled: true
+  block_invalid_packets: true
+  block_bot_signatures: true
+  block_malformed_handshake: true
+  max_packet_size: 2097151 # 2MB - 1
+
+ratelimit:
+  enabled: true
+  # Connections per second per IP
+  connections_per_second: 5
+  # Total connections per second before emergency mode
+  total_connections_per_second: 1000
+  # Emergency mode duration
+  emergency_mode_duration: 60s
+  # Auto-disable protection on extreme load
+  auto_disable_threshold: 5000
+  auto_disable_duration: 300s
+  # Whitelist IPs (no rate limiting)
+  whitelist:
+    - "127.0.0.1"
+  # Blacklist IPs (auto-block)
+  blacklist: []
+
+logging:
+  level: "info" # debug, info, warn, error
+  format: "json" # json, text
+  output: "stdout" # stdout, file
+  file_path: "/var/log/shield/shield.log"
+

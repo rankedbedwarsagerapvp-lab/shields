@@ -1,0 +1,1783 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>MangoShield Panel</title>
+
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+
+    <style>
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: #18181b; }
+        ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #52525b; }
+
+        .chart-line { stroke-dasharray: 2000; stroke-dashoffset: 2000; animation: draw 2s forwards; }
+        @keyframes draw { to { stroke-dashoffset: 0; } }
+
+        /* Animations */
+        @keyframes fade-in {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        @keyframes scale-in {
+            from {
+                opacity: 0;
+                transform: scale(0.95);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1);
+            }
+        }
+
+        .animate-fade-in {
+            animation: fade-in 0.2s ease-out;
+        }
+
+        .animate-scale-in {
+            animation: scale-in 0.2s ease-out;
+        }
+
+        /* Toggle switch */
+        .toggle-switch {
+            @apply relative inline-block w-11 h-6 rounded-full bg-zinc-700 transition;
+        }
+        .toggle-switch input:checked + .slider { @apply bg-orange-500; }
+        .toggle-switch input:checked + .slider:before {
+            @apply translate-x-5;
+        }
+        .slider {
+            @apply absolute cursor-pointer inset-0 rounded-full bg-zinc-700 transition;
+        }
+        .slider:before {
+            @apply absolute content-[''] h-5 w-5 left-0.5 top-0.5 bg-white rounded-full transition;
+        }
+    </style>
+</head>
+<body class="bg-black text-white font-sans">
+
+<!-- State -->
+<script>
+    const API_BASE = 'http://localhost:8080/api';
+
+    let state = {
+        currentView: 'login',
+        selectedProject: null,
+        currentUser: null,
+        projects: [],
+        backends: [
+            { group: 'Default', type: 'Default', proxy: 'HAProxy', count: 0 }
+        ],
+        domains: [],
+        protection: {
+            intelligence: false,
+            captcha: false,
+            antiforge: true,
+            rawSocket: false
+        },
+        plan: 'Free',
+        // Shield API stats
+        stats: {
+            total_connections: 0,
+            blocked_connections: 0,
+            active_connections: 0,
+            bps: 0,
+            pps: 0,
+            traffic_gb: 0,
+            connections_history: []
+        },
+        // Domain validation state
+        validatingDomain: false,
+        // Новые состояния для меню и модальных окон
+        openMenuGroup: null,
+        modalType: null,
+        editingGroup: null,
+        showAccountMenu: false,
+        showCreateProjectModal: false
+    };
+
+    function setView(view) {
+        state.currentView = view;
+        render();
+    }
+
+    function selectProject(project) {
+        state.selectedProject = project;
+        setView('dashboard');
+    }
+
+    function toggleProtection(key) {
+        state.protection[key] = !state.protection[key];
+        render();
+    }
+
+    function createProject() {
+        // Check if FREE plan limit reached
+        if (state.currentUser && state.currentUser.plan === 'Free' && state.projects.length >= 1) {
+            showNotification('Free plan allows only 1 project. Upgrade to create more!', 'warning');
+            return;
+        }
+
+        // Show modal
+        state.showCreateProjectModal = true;
+        render();
+    }
+
+    async function submitCreateProject() {
+        const name = document.getElementById('project-name-input').value.trim();
+
+        if (!name) {
+            showNotification('Please enter project name', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch(`${API_BASE}/projects/create`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ name, domain: '' })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                showNotification('Project created successfully!', 'success');
+                state.showCreateProjectModal = false;
+                await loadProjects();
+                render();
+            } else {
+                showNotification(data.error || 'Failed to create project', 'error');
+            }
+        } catch (error) {
+            showNotification('Connection error', 'error');
+            console.error(error);
+        }
+    }
+
+    function closeCreateProjectModal() {
+        state.showCreateProjectModal = false;
+        render();
+    }
+
+    async function handleLogin(email, password) {
+        try {
+            const response = await fetch(`${API_BASE}/auth/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ email, password })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                // Load user data
+                state.currentUser = {
+                    email: email,
+                    name: email.split('@')[0],
+                    plan: 'Free',
+                    projects: []
+                };
+
+                localStorage.setItem('userEmail', email);
+                showNotification('Login successful!', 'success');
+
+                // Load projects
+                await loadProjects();
+
+                setView('projects');
+            } else {
+                showNotification(data.error || 'Login failed', 'error');
+            }
+        } catch (error) {
+            showNotification('Connection error', 'error');
+            console.error(error);
+        }
+    }
+
+    async function handleRegister(email, password, name) {
+        try {
+            const response = await fetch(`${API_BASE}/auth/register`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    email,
+                    password,
+                    name: name || email.split('@')[0],
+                    plan: 'Free',
+                    projects: [],
+                    created_at: new Date().toISOString()
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                showNotification('Registration successful! Please login.', 'success');
+                setView('login');
+            } else {
+                showNotification(data.error || 'Registration failed', 'error');
+            }
+        } catch (error) {
+            showNotification('Connection error', 'error');
+            console.error(error);
+        }
+    }
+
+    async function handleLogout() {
+        try {
+            await fetch(`${API_BASE}/auth/logout`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: state.currentUser.email })
+            });
+        } catch (error) {
+            console.error(error);
+        }
+
+        state.currentUser = null;
+        state.selectedProject = null;
+        state.projects = [];
+        localStorage.removeItem('userEmail');
+        setView('login');
+    }
+
+    function createBackendGroup() {
+        const name = prompt('Group name:');
+        if (name) {
+            state.backends.push({ group: name, type: 'Default', proxy: 'HAProxy', count: 0 });
+            render();
+        }
+    }
+
+    async function createDomain() {
+        const input = document.getElementById('new-domain-input');
+        const domain = input.value.trim();
+
+        if (!domain || !domain.includes('.')) {
+            showNotification('Please enter a valid domain', 'error');
+            return;
+        }
+
+        if (!state.selectedProject || !state.selectedProject.shield_id) {
+            showNotification('No project selected', 'error');
+            return;
+        }
+
+        // Show validating state
+        state.validatingDomain = true;
+        render();
+
+        try {
+            // Validate CNAME record
+            const response = await fetch(`${API_BASE}/projects/validate-domain`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({
+                    shield_id: state.selectedProject.shield_id,
+                    domain: domain
+                })
+            });
+
+            const data = await response.json();
+
+            state.validatingDomain = false;
+
+            if (data.success) {
+                showNotification('Domain validated and activated!', 'success');
+                await loadProjects();
+                input.value = '';
+                document.getElementById('create-domain-modal').classList.add('hidden');
+                render();
+            } else {
+                showNotification(data.message || 'CNAME validation failed', 'warning');
+                render();
+            }
+        } catch (error) {
+            state.validatingDomain = false;
+            showNotification('Connection error', 'error');
+            render();
+            console.error('Error:', error);
+        }
+    }
+
+    function showNotification(message, type) {
+        const colors = {
+            success: 'bg-green-500',
+            error: 'bg-red-500',
+            warning: 'bg-yellow-500'
+        };
+
+        const notification = document.createElement('div');
+        notification.className = `fixed top-4 right-4 ${colors[type] || 'bg-blue-500'} text-white px-6 py-3 rounded-lg shadow-lg z-50 transition-opacity`;
+        notification.textContent = message;
+
+        document.body.appendChild(notification);
+
+        setTimeout(() => {
+            notification.style.opacity = '0';
+            setTimeout(() => notification.remove(), 300);
+        }, 3000);
+    }
+
+    // Новые функции для работы с меню и модальными окнами
+    function toggleMenu(groupName) {
+        if (state.openMenuGroup === groupName) {
+            state.openMenuGroup = null;
+        } else {
+            state.openMenuGroup = groupName;
+        }
+        render();
+    }
+
+    function closeMenu() {
+        state.openMenuGroup = null;
+        render();
+    }
+
+    function openModal(modalType, groupName) {
+        state.modalType = modalType;
+        state.editingGroup = groupName;
+        state.openMenuGroup = null;
+        render();
+    }
+
+    function closeModal() {
+        state.modalType = null;
+        state.editingGroup = null;
+        render();
+    }
+
+    async function addBackend() {
+        const hostname = document.getElementById('backend-hostname').value;
+        const port = document.getElementById('backend-port').value;
+
+        if (!hostname || !port) {
+            showNotification('Please fill all fields', 'error');
+            return;
+        }
+
+        if (!state.selectedProject || !state.selectedProject.shield_id) {
+            showNotification('No project selected', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch(`${API_BASE}/backends/add`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({
+                    shield_id: state.selectedProject.shield_id,
+                    ip: hostname,
+                    port: parseInt(port)
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                showNotification('Backend added successfully!', 'success');
+                await loadProjects();
+                closeModal();
+            } else {
+                showNotification(data.error || 'Failed to add backend', 'error');
+            }
+        } catch (error) {
+            showNotification('Connection error', 'error');
+            console.error(error);
+        }
+    }
+
+    async function removeBackend(backendId) {
+        if (!confirm('Are you sure you want to remove this backend?')) return;
+
+        if (!state.selectedProject || !state.selectedProject.shield_id) {
+            showNotification('No project selected', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch(`${API_BASE}/backends/remove`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({
+                    shield_id: state.selectedProject.shield_id,
+                    backend_id: backendId
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                showNotification('Backend removed successfully!', 'success');
+                await loadProjects();
+                render();
+            } else {
+                showNotification(data.error || 'Failed to remove backend', 'error');
+            }
+        } catch (error) {
+            showNotification('Connection error', 'error');
+            console.error(error);
+        }
+    }
+
+    async function validateDomain() {
+        if (!state.selectedProject || !state.selectedProject.shield_id) {
+            showNotification('No project selected', 'error');
+            return;
+        }
+
+        if (!state.selectedProject.domain) {
+            showNotification('Please add a domain first', 'warning');
+            return;
+        }
+
+        showNotification('Validating CNAME record...', 'info');
+
+        // Update status to validating
+        if (state.selectedProject) {
+            state.selectedProject.status = 'validating';
+            render();
+        }
+
+        try {
+            const response = await fetch(`${API_BASE}/projects/validate-domain`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({
+                    shield_id: state.selectedProject.shield_id,
+                    domain: state.selectedProject.domain
+                })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                showNotification('Domain validated successfully!', 'success');
+                await loadProjects();
+                render();
+            } else {
+                showNotification(data.message || 'CNAME validation failed', 'warning');
+                // Update status to error
+                if (state.selectedProject) {
+                    state.selectedProject.status = 'error';
+                }
+                render();
+            }
+        } catch (error) {
+            showNotification('Connection error', 'error');
+            console.error(error);
+        }
+    }
+
+    async function addDomainToProject() {
+        const domainInput = document.getElementById('domain-input');
+        const domain = domainInput ? domainInput.value.trim() : '';
+
+        if (!domain || !domain.includes('.')) {
+            showNotification('Please enter a valid domain', 'error');
+            return;
+        }
+
+        if (!state.selectedProject || !state.selectedProject.shield_id) {
+            showNotification('No project selected', 'error');
+            return;
+        }
+
+        // Update project domain locally
+        state.selectedProject.domain = domain;
+        state.selectedProject.status = 'pending';
+
+        showNotification('Domain added! Please configure DNS and validate.', 'success');
+
+        // Update on server
+        try {
+            await loadProjects();
+        } catch (error) {
+            console.error('Error updating projects:', error);
+        }
+
+        render();
+    }
+
+    function updateGroup() {
+        const groupName = document.getElementById('group-name').value;
+        const enableHAProxy = document.getElementById('enable-haproxy').checked;
+        const defaultGroup = document.getElementById('default-group').checked;
+
+        if (groupName) {
+            // Здесь должна быть логика обновления группы
+            alert(`Группа обновлена: ${groupName}, HAProxy: ${enableHAProxy}, Default: ${defaultGroup}`);
+            closeModal();
+        } else {
+            alert('Пожалуйста, введите имя группы');
+        }
+    }
+
+    function deleteGroup() {
+        if (state.editingGroup) {
+            // Здесь должна быть логика удаления группы
+            alert(`Группа "${state.editingGroup}" удалена`);
+            state.backends = state.backends.filter(b => b.group !== state.editingGroup);
+            closeModal();
+        }
+    }
+
+    // Shield API Integration Functions
+    async function loadProjects() {
+        try {
+            const response = await fetch(`${API_BASE}/projects`, {
+                credentials: 'include'
+            });
+            const data = await response.json();
+            if (data.success) {
+                state.projects = data.data || [];
+                if (state.currentUser) {
+                    state.currentUser.projects = state.projects;
+                }
+
+                // Update selected project if it exists
+                if (state.selectedProject && state.selectedProject.shield_id) {
+                    const updated = state.projects.find(p => p.shield_id === state.selectedProject.shield_id);
+                    if (updated) {
+                        state.selectedProject = updated;
+                    }
+                }
+
+                render();
+            }
+        } catch (error) {
+            console.error('Failed to load projects:', error);
+        }
+    }
+
+    async function loadShieldData() {
+        try {
+            const response = await fetch(`${API_BASE}/config`);
+            const data = await response.json();
+            if (data.success) {
+                state.domains = data.data.antiforge?.allowed_domains || [];
+                state.protection.antiforge = data.data.antiforge?.enabled || false;
+                render();
+            }
+        } catch (error) {
+            console.error('Failed to load Shield data:', error);
+        }
+    }
+
+    async function loadStats() {
+        try {
+            // Load project-specific stats if project is selected
+            if (state.selectedProject && state.selectedProject.shield_id) {
+                const response = await fetch(`${API_BASE}/projects/stats?shield_id=${state.selectedProject.shield_id}`, {
+                    credentials: 'include'
+                });
+                const data = await response.json();
+                if (data.success) {
+                    const stats = data.data;
+
+                    // Real stats from project
+                    const totalBytes = stats.bytes_transferred || 0;
+                    state.stats.bps = stats.packets_per_second || 0; // BPS in bytes/s
+                    state.stats.active_connections = stats.active_players || 0;
+                    state.stats.pps = stats.packets_per_second || 0;
+                    state.stats.traffic_gb = totalBytes / (1024 * 1024 * 1024); // Convert to GB
+
+                    // Update history with traffic data
+                    if (stats.traffic_history && stats.traffic_history.length > 0) {
+                        state.stats.connections_history = stats.traffic_history.map(p => p.bps / 1024); // KB/s
+                    } else {
+                        // Add current BPS to history
+                        if (!state.stats.connections_history) state.stats.connections_history = [];
+                        state.stats.connections_history.push(state.stats.bps / 1024);
+                        if (state.stats.connections_history.length > 60) {
+                            state.stats.connections_history.shift();
+                        }
+                    }
+
+                    updateDashboardMetrics();
+                    updateTrafficGraph();
+                }
+            } else {
+                // Global stats fallback
+                const response = await fetch(`${API_BASE}/stats`);
+                const data = await response.json();
+                if (data.success) {
+                    const stats = data.data;
+
+                    // Use global stats
+                    state.stats.active_connections = stats.active_connections || 0;
+                    state.stats.total_connections = stats.total_connections || 0;
+                    state.stats.blocked_connections = stats.blocked_connections || 0;
+
+                    if (!state.stats.connections_history) state.stats.connections_history = [];
+                    state.stats.connections_history.push(stats.active_connections);
+                    if (state.stats.connections_history.length > 60) {
+                        state.stats.connections_history.shift();
+                    }
+
+                    updateDashboardMetrics();
+                    updateTrafficGraph();
+                }
+            }
+        } catch (error) {
+            console.error('Failed to load stats:', error);
+        }
+    }
+
+    function updateDashboardMetrics() {
+        const bpsEl = document.getElementById('metric-bps');
+        const playersEl = document.getElementById('metric-players');
+        const ppsEl = document.getElementById('metric-pps');
+        const trafficEl = document.getElementById('metric-traffic');
+
+        if (bpsEl) bpsEl.textContent = `${state.stats.bps.toFixed(2)} KB/s`;
+        if (playersEl) playersEl.textContent = state.stats.active_connections;
+        if (ppsEl) ppsEl.textContent = formatNumber(state.stats.pps);
+        if (trafficEl) trafficEl.textContent = `${state.stats.traffic_gb.toFixed(2)} GB`;
+    }
+
+    function formatNumber(num) {
+        if (num >= 1000000) return (num / 1000000).toFixed(2) + 'M';
+        if (num >= 1000) return (num / 1000).toFixed(2) + 'K';
+        return num.toString();
+    }
+
+    function generateTrafficPath() {
+        if (!state.stats.connections_history || state.stats.connections_history.length === 0) {
+            return "M 50 200 Q 100 180 150 190 T 250 195 T 350 185 T 450 120 T 550 160 T 650 150 T 750 140 T 850 100 T 950 130 T 1050 80 T 1150 160";
+        }
+
+        const history = state.stats.connections_history;
+        const maxVal = Math.max(...history, 1);
+        const points = [];
+
+        for (let i = 0; i < history.length; i++) {
+            const x = 50 + (i * 1150 / Math.max(history.length - 1, 1));
+            const y = 200 - (history[i] / maxVal) * 150;
+            points.push(`${x} ${y}`);
+        }
+
+        if (points.length < 2) return "M 50 200 L 1150 200";
+
+        let path = `M ${points[0]}`;
+        for (let i = 1; i < points.length; i++) {
+            const prev = points[i - 1].split(' ');
+            const curr = points[i].split(' ');
+            const cpx = (parseFloat(prev[0]) + parseFloat(curr[0])) / 2;
+            path += ` Q ${cpx} ${prev[1]} ${curr[0]} ${curr[1]}`;
+        }
+
+        return path;
+    }
+
+    function updateTrafficGraph() {
+        const pathEl = document.getElementById('traffic-path');
+        if (pathEl) {
+            pathEl.setAttribute('d', generateTrafficPath());
+        }
+    }
+
+    async function removeDomainShield(domain) {
+        if (!confirm(`Delete domain ${domain}?`)) return;
+
+        try {
+            const response = await fetch(`${API_BASE}/domains/remove`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ domain })
+            });
+
+            const data = await response.json();
+
+            if (data.success) {
+                state.domains = state.domains.filter(dom => dom !== domain);
+                render();
+                alert('Domain removed successfully!');
+            } else {
+                alert(data.error || 'Failed to remove domain');
+            }
+        } catch (error) {
+            console.error('Error:', error);
+            alert('Connection error');
+        }
+    }
+
+    function render() {
+        const appEl = document.getElementById('app');
+        if (!appEl) {
+            console.error('App element not found!');
+            return;
+        }
+        appEl.innerHTML = getViewHTML();
+        lucide.createIcons();
+    }
+
+    function getViewHTML() {
+        switch (state.currentView) {
+            case 'login': return loginView();
+            case 'register': return registerView();
+            case 'projects': return projectsView();
+            case 'dashboard': return dashboardView();
+            case 'backends': return backendsView();
+            case 'domains': return domainsView();
+            case 'protection': return protectionView();
+            case 'plan': return planView();
+            case 'help': return helpView();
+            default: return loginView();
+        }
+    }
+
+    // Initialize the app
+    function initApp() {
+        // Check saved session
+        const savedEmail = localStorage.getItem('userEmail');
+        if (savedEmail) {
+            state.currentUser = {
+                email: savedEmail,
+                name: savedEmail.split('@')[0],
+                plan: 'Free',
+                projects: []
+            };
+            state.currentView = 'projects';
+            loadProjects(); // Load projects on startup
+        }
+
+        loadShieldData();
+        loadStats();
+        render();
+        // Update stats every 2 seconds
+        setInterval(loadStats, 2000);
+        // Update projects every 10 seconds if logged in
+        setInterval(() => {
+            if (state.currentUser) {
+                loadProjects();
+            }
+        }, 10000);
+    }
+
+    // Wait for DOM and Lucide to load
+    document.addEventListener('DOMContentLoaded', () => {
+        lucide.createIcons();
+        initApp();
+    });
+</script>
+
+<!-- App -->
+<div id="app"></div>
+
+<!-- Views -->
+<script>
+    function loginView() {
+        return `
+      <div class="min-h-screen bg-black flex items-center justify-center">
+        <div class="w-full max-w-md">
+          <div class="text-center mb-8">
+            <div class="flex items-center justify-center gap-3 mb-4">
+              <i data-lucide="shield" class="w-12 h-12 text-orange-500"></i>
+              <span class="text-4xl font-bold text-white">Shield</span>
+            </div>
+            <h1 class="text-3xl font-bold text-white mb-2">Login</h1>
+            <p class="text-gray-400">Enter your email and password to continue</p>
+          </div>
+
+          <div class="bg-zinc-900 rounded-lg p-8 border border-zinc-800">
+            <div class="mb-6">
+              <label class="block text-gray-300 mb-2">Email</label>
+              <input id="login-email" type="email" placeholder="you@example.com"
+                     class="w-full bg-zinc-800 text-white rounded px-4 py-3 border border-zinc-700 focus:border-orange-600 focus:outline-none">
+            </div>
+
+            <div class="mb-6">
+              <label class="block text-gray-300 mb-2">Password</label>
+              <input id="login-password" type="password" placeholder="••••••••"
+                     class="w-full bg-zinc-800 text-white rounded px-4 py-3 border border-zinc-700 focus:border-orange-600 focus:outline-none"
+                     onkeypress="if(event.key==='Enter') document.getElementById('login-btn').click()">
+            </div>
+
+            <button id="login-btn" onclick="
+              const email = document.getElementById('login-email').value;
+              const password = document.getElementById('login-password').value;
+              if(email && password) handleLogin(email, password);
+              else alert('Please fill all fields');
+            " class="w-full bg-orange-600 hover:bg-orange-500 text-white rounded py-3 font-medium transition">
+              Login
+            </button>
+
+            <div class="mt-6 text-center">
+              <span class="text-gray-400">No account? </span>
+              <button onclick="setView('register')" class="text-orange-400 hover:text-orange-300">Sign Up</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    function registerView() {
+        return `
+      <div class="min-h-screen bg-black flex items-center justify-center">
+        <div class="w-full max-w-md">
+          <div class="text-center mb-8">
+            <div class="flex items-center justify-center gap-3 mb-4">
+              <i data-lucide="shield" class="w-12 h-12 text-orange-500"></i>
+              <span class="text-4xl font-bold text-white">Shield</span>
+            </div>
+            <h1 class="text-3xl font-bold text-white mb-2">Sign Up</h1>
+            <p class="text-gray-400">Create your account</p>
+          </div>
+
+          <div class="bg-zinc-900 rounded-lg p-8 border border-zinc-800">
+            <div class="mb-6">
+              <label class="block text-gray-300 mb-2">Name</label>
+              <input id="register-name" type="text" placeholder="Your name"
+                     class="w-full bg-zinc-800 text-white rounded px-4 py-3 border border-zinc-700 focus:border-orange-600 focus:outline-none">
+            </div>
+
+            <div class="mb-6">
+              <label class="block text-gray-300 mb-2">Email</label>
+              <input id="register-email" type="email" placeholder="you@example.com"
+                     class="w-full bg-zinc-800 text-white rounded px-4 py-3 border border-zinc-700 focus:border-orange-600 focus:outline-none">
+            </div>
+
+            <div class="mb-6">
+              <label class="block text-gray-300 mb-2">Password</label>
+              <input id="register-password" type="password" placeholder="••••••••"
+                     class="w-full bg-zinc-800 text-white rounded px-4 py-3 border border-zinc-700 focus:border-orange-600 focus:outline-none"
+                     onkeypress="if(event.key==='Enter') document.getElementById('register-btn').click()">
+            </div>
+
+            <button id="register-btn" onclick="
+              const email = document.getElementById('register-email').value;
+              const password = document.getElementById('register-password').value;
+              const name = document.getElementById('register-name').value;
+              if(email && password) handleRegister(email, password, name);
+              else alert('Please fill all fields');
+            " class="w-full bg-orange-600 hover:bg-orange-500 text-white rounded py-3 font-medium transition">
+              Sign Up
+            </button>
+
+            <div class="mt-6 text-center">
+              <span class="text-gray-400">Already have account? </span>
+              <button onclick="setView('login')" class="text-orange-400 hover:text-orange-300">Login</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    function sidebar(currentView) {
+        const proj = state.selectedProject;
+        return `
+      <div class="fixed left-0 top-0 h-full w-64 bg-zinc-950 border-r border-zinc-800 flex flex-col">
+        <div class="p-6 border-b border-zinc-800">
+          <div class="flex items-center gap-3">
+            <i data-lucide="shield" class="w-8 h-8 text-orange-500"></i>
+            <span class="text-xl font-bold text-white">MangoShield</span>
+          </div>
+        </div>
+
+        ${proj ? `
+        <div class="p-4 border-b border-zinc-800">
+          <button class="w-full flex items-center justify-between p-3 bg-zinc-900 rounded-lg hover:bg-zinc-800 transition">
+            <div class="flex items-center gap-2">
+              <div class="w-8 h-8 bg-orange-500 rounded flex items-center justify-center text-white text-sm font-bold">
+                ${proj.name.substring(0, 2).toUpperCase()}
+              </div>
+              <div class="text-left">
+                <div class="text-white text-sm font-medium">${proj.name}</div>
+                <div class="text-gray-400 text-xs">ID: ${proj.id}</div>
+              </div>
+            </div>
+            <i data-lucide="chevron-down" class="w-4 h-4 text-gray-400"></i>
+          </button>
+        </div>` : ''}
+
+        <nav class="flex-1 p-4">
+          <button onclick="setView('projects')"
+                  class="w-full flex items-center gap-3 px-3 py-2 rounded-lg transition mb-1 ${!proj ? 'bg-zinc-800 text-white' : 'text-gray-400 hover:bg-zinc-900 hover:text-white'}">
+            <i data-lucide="plus" class="w-5 h-5"></i> <span>Create Project</span>
+          </button>
+
+          ${proj ? `
+            <button onclick="setView('dashboard')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg transition mb-1 ${currentView === 'dashboard' ? 'bg-zinc-800 text-white' : 'text-gray-400 hover:bg-zinc-900 hover:text-white'}">
+              <i data-lucide="bar-chart-3" class="w-5 h-5"></i> <span>Dashboard</span>
+            </button>
+            <button onclick="setView('backends')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg transition mb-1 ${currentView === 'backends' ? 'bg-zinc-800 text-white' : 'text-gray-400 hover:bg-zinc-900 hover:text-white'}">
+              <i data-lucide="server" class="w-5 h-5"></i> <span>Backends</span>
+            </button>
+            <button onclick="setView('domains')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg transition mb-1 ${currentView === 'domains' ? 'bg-zinc-800 text-white' : 'text-gray-400 hover:bg-zinc-900 hover:text-white'}">
+              <i data-lucide="globe" class="w-5 h-5"></i> <span>Domains</span>
+            </button>
+            <button onclick="setView('protection')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg transition mb-1 ${currentView === 'protection' ? 'bg-zinc-800 text-white' : 'text-gray-400 hover:bg-zinc-900 hover:text-white'}">
+              <i data-lucide="shield-alert" class="w-5 h-5"></i> <span>Protection</span>
+            </button>
+            <button onclick="setView('plan')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg transition mb-1 ${currentView === 'plan' ? 'bg-zinc-800 text-white' : 'text-gray-400 hover:bg-zinc-900 hover:text-white'}">
+              <i data-lucide="activity" class="w-5 h-5"></i> <span>Plan</span>
+            </button>
+          ` : ''}
+        </nav>
+
+        <div class="p-4 border-t border-zinc-800">
+          <button class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-gray-400 hover:bg-zinc-900 hover:text-white transition mb-1">
+            <i data-lucide="settings" class="w-5 h-5"></i> <span>Settings</span>
+          </button>
+          <button onclick="setView('help')" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-gray-400 hover:bg-zinc-900 hover:text-white transition mb-1 ${currentView === 'help' ? 'bg-zinc-800 text-white' : 'text-gray-400 hover:bg-zinc-900 hover:text-white'}">
+            <i data-lucide="help-circle" class="w-5 h-5"></i> <span>Help</span>
+          </button>
+
+          ${state.currentUser ? `
+          <div class="mt-4 relative">
+            <div class="flex items-center gap-3 p-3 bg-zinc-900 rounded-lg cursor-pointer" onclick="state.showAccountMenu = !state.showAccountMenu; render();">
+              <div class="w-10 h-10 bg-gradient-to-br from-orange-400 to-yellow-500 rounded-lg flex items-center justify-center">
+                <span class="text-white font-bold">${state.currentUser.name.charAt(0).toUpperCase()}</span>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="text-white text-sm font-medium truncate">${state.currentUser.name}</div>
+                <div class="text-gray-400 text-xs truncate">${state.currentUser.email}</div>
+                <div class="text-orange-400 text-xs">Plan: ${state.currentUser.plan}</div>
+              </div>
+              <button class="text-gray-400 hover:text-white">
+                <i data-lucide="more-vertical" class="w-5 h-5"></i>
+              </button>
+            </div>
+            ${state.showAccountMenu ? `
+            <div class="absolute bottom-full left-0 right-0 mb-2 bg-zinc-800 border border-zinc-700 rounded-lg shadow-lg z-50">
+              <button onclick="handleLogout()" class="w-full text-left px-4 py-2 text-red-400 hover:bg-zinc-700 rounded flex items-center gap-2">
+                <i data-lucide="log-out" class="w-4 h-4"></i> Logout
+              </button>
+            </div>
+            ` : ''}
+          </div>
+          ` : ''}
+        </div>
+      </div>`;
+    }
+
+    function projectsView() {
+        const canCreateMore = !(state.currentUser?.plan === 'Free' && state.projects.length >= 1);
+
+        return `
+      <div class="min-h-screen bg-black">
+        ${sidebar('projects')}
+        <div class="ml-64 p-8">
+          <div class="flex items-center justify-between mb-8">
+            <h1 class="text-3xl font-bold text-white">Projects</h1>
+          </div>
+
+          ${state.currentUser?.plan === 'Free' && state.projects.length >= 1 ? `
+          <div class="bg-amber-900/20 border border-amber-700/50 rounded-lg p-4 mb-6 flex items-start gap-3">
+            <i data-lucide="info" class="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5"></i>
+            <div>
+              <h3 class="text-amber-500 font-semibold mb-1">Free Plan Limit</h3>
+              <p class="text-amber-200/80 text-sm">You've reached the limit of 1 project on Free plan. <button onclick="setView('plan')" class="text-amber-400 hover:text-amber-300 underline">Upgrade</button> to create more projects.</p>
+            </div>
+          </div>
+          ` : ''}
+
+          <div class="grid grid-cols-3 gap-6">
+            ${state.projects.map(p => `
+              <div onclick="selectProject(${JSON.stringify(p).replace(/"/g, '&quot;')})"
+                   class="bg-zinc-900 rounded-lg p-6 border border-zinc-800 hover:border-orange-600 transition cursor-pointer">
+                <div class="flex items-start justify-between mb-4">
+                  <div>
+                    <h3 class="text-xl font-semibold text-white mb-1">${p.name}</h3>
+                    <p class="text-sm text-gray-500">ID: ${p.shield_id || p.id}</p>
+                  </div>
+                </div>
+                <button class="w-full bg-orange-600 hover:bg-orange-500 text-white rounded py-2 font-medium transition">
+                  Open
+                </button>
+              </div>
+            `).join('')}
+
+            <button onclick="createProject()" class="bg-zinc-900 rounded-lg p-6 border-2 border-dashed ${canCreateMore ? 'border-zinc-800 hover:border-orange-600 text-gray-400 hover:text-orange-400' : 'border-zinc-800 text-gray-600 opacity-50 cursor-not-allowed'} transition flex flex-col items-center justify-center gap-3" ${!canCreateMore ? 'disabled' : ''}>
+              <i data-lucide="plus" class="w-8 h-8"></i>
+              <span class="font-medium">Create Project</span>
+              ${!canCreateMore ? '<span class="text-xs text-amber-500">Upgrade required</span>' : ''}
+            </button>
+          </div>
+        </div>
+
+        ${state.showCreateProjectModal ? `
+        <div class="fixed inset-0 bg-black/80 flex items-center justify-center z-50 animate-fade-in" onclick="if(event.target === this) closeCreateProjectModal()">
+          <div class="bg-zinc-900 rounded-xl w-full max-w-md border border-zinc-700 shadow-2xl animate-scale-in">
+            <!-- Header -->
+            <div class="flex items-center justify-between p-6 border-b border-zinc-800">
+              <h2 class="text-2xl font-bold text-white">Создать Проект</h2>
+              <button onclick="closeCreateProjectModal()" class="text-gray-400 hover:text-white transition">
+                <i data-lucide="x" class="w-6 h-6"></i>
+              </button>
+            </div>
+
+            <!-- Body -->
+            <div class="p-6">
+              <p class="text-gray-400 text-sm mb-6">Создайте новый проект для начала работы</p>
+
+              <div class="mb-6">
+                <label class="block text-gray-300 mb-2 font-medium">Название Проекта</label>
+                <input
+                  id="project-name-input"
+                  type="text"
+                  placeholder="Введите название проекта"
+                  class="w-full bg-zinc-800 text-white rounded-lg px-4 py-3 border border-zinc-700 focus:border-orange-500 focus:outline-none transition"
+                  onkeypress="if(event.key==='Enter') submitCreateProject()"
+                />
+              </div>
+            </div>
+
+            <!-- Footer -->
+            <div class="flex items-center justify-end gap-3 p-6 border-t border-zinc-800 bg-zinc-800/50">
+              <button
+                onclick="closeCreateProjectModal()"
+                class="px-6 py-2.5 bg-zinc-700 hover:bg-zinc-600 text-white rounded-lg font-medium transition">
+                Отмена
+              </button>
+              <button
+                onclick="submitCreateProject()"
+                class="px-6 py-2.5 bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white rounded-lg font-medium transition shadow-lg shadow-orange-500/20">
+                Создать Проект
+              </button>
+            </div>
+          </div>
+        </div>
+        ` : ''}
+      </div>`;
+    }
+
+    function metricCard(title, value, subtitle) {
+        return `
+      <div class="bg-zinc-900 rounded-lg p-6 border border-zinc-800">
+        <h3 class="text-gray-400 text-sm mb-2">${title}</h3>
+        <p class="text-3xl font-bold text-white mb-1">${value}</p>
+        <p class="text-gray-500 text-xs">${subtitle}</p>
+      </div>`;
+    }
+
+    function dashboardView() {
+        const name = state.selectedProject?.name || 'Minecraft';
+        return `
+      <div class="min-h-screen bg-black">
+        ${sidebar('dashboard')}
+        <div class="ml-64 p-8">
+          <div class="flex items-center justify-between mb-8">
+            <h1 class="text-3xl font-bold text-white">${name}</h1>
+            <button class="text-gray-400 hover:text-white">Documentation</button>
+          </div>
+
+          <div class="grid grid-cols-4 gap-6 mb-8">
+            <div class="bg-zinc-900 rounded-lg p-6 border border-zinc-800">
+              <h3 class="text-gray-400 text-sm mb-2">Current BPS</h3>
+              <p id="metric-bps" class="text-3xl font-bold text-white mb-1">${state.stats.bps.toFixed(2)} KB/s</p>
+              <p class="text-gray-500 text-xs">Current BPS</p>
+            </div>
+            <div class="bg-zinc-900 rounded-lg p-6 border border-zinc-800">
+              <h3 class="text-gray-400 text-sm mb-2">Players Online</h3>
+              <p id="metric-players" class="text-3xl font-bold text-white mb-1">${state.stats.active_connections}</p>
+              <p class="text-gray-500 text-xs">Players Online</p>
+            </div>
+            <div class="bg-zinc-900 rounded-lg p-6 border border-zinc-800">
+              <h3 class="text-gray-400 text-sm mb-2">Current PPS</h3>
+              <p id="metric-pps" class="text-3xl font-bold text-white mb-1">${formatNumber(state.stats.pps)}</p>
+              <p class="text-gray-500 text-xs">Current PPS</p>
+            </div>
+            <div class="bg-zinc-900 rounded-lg p-6 border border-zinc-800">
+              <h3 class="text-gray-400 text-sm mb-2">Monthly Traffic</h3>
+              <p id="metric-traffic" class="text-3xl font-bold text-white mb-1">${state.stats.traffic_gb.toFixed(2)} GB</p>
+              <p class="text-gray-500 text-xs">Monthly Traffic</p>
+            </div>
+          </div>
+
+          <div class="bg-zinc-900 rounded-lg p-6 border border-zinc-800">
+            <div class="flex items-center justify-between mb-6">
+              <div>
+                <h3 class="text-xl font-semibold text-white mb-1">Network Traffic</h3>
+                <p class="text-gray-400">Traffic statistics for the selected period</p>
+              </div>
+              <div class="flex gap-2">
+                <button class="px-4 py-2 bg-zinc-800 text-gray-300 rounded hover:bg-zinc-700 transition">Last 3 months</button>
+                <button class="px-4 py-2 bg-zinc-800 text-gray-300 rounded hover:bg-zinc-700 transition">Last 30 days</button>
+                <button class="px-4 py-2 bg-orange-600 text-white rounded hover:bg-orange-500 transition">Last 7 days</button>
+              </div>
+            </div>
+
+            <div class="h-64 relative">
+              <svg class="w-full h-full" viewBox="0 0 1200 250">
+                <defs>
+                  <linearGradient id="gradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                    <stop offset="0%" style="stop-color:#fb923c;stop-opacity:0.3" />
+                    <stop offset="100%" style="stop-color:#fb923c;stop-opacity:0" />
+                  </linearGradient>
+                </defs>
+                ${[200,150,100,50].map(y => `<line x1="0" y1="${y}" x2="1200" y2="${y}" stroke="#27272a" stroke-width="1"/>`).join('')}
+                <path id="traffic-path" d="${generateTrafficPath()}" stroke="#fb923c" stroke-width="2" fill="none" style="transition: d 0.5s ease-in-out;"/>
+              </svg>
+              <div class="absolute left-0 top-0 text-xs text-gray-500">400 KB/s</div>
+              <div class="absolute left-0 top-1/4 text-xs text-gray-500">300 KB/s</div>
+              <div class="absolute left-0 top-2/4 text-xs text-gray-500">200 KB/s</div>
+              <div class="absolute left-0 top-3/4 text-xs text-gray-500">100 KB/s</div>
+              <div class="absolute left-0 bottom-0 text-xs text-gray-500">0 KB/s</div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    function backendsView() {
+        const backends = state.selectedProject?.backends || [];
+
+        return `
+      <div class="min-h-screen bg-black">
+        ${sidebar('backends')}
+        <div class="ml-64 p-8">
+          <div class="flex items-center justify-between mb-8">
+            <h1 class="text-3xl font-bold text-white">Backends</h1>
+            <button onclick="openModal('addBackend')" class="px-4 py-2 bg-orange-600 text-white rounded hover:bg-orange-500 transition flex items-center gap-2">
+              <i data-lucide="plus" class="w-4 h-4"></i> Add Backend
+            </button>
+          </div>
+
+          <!-- Firewall Warning -->
+          <div class="bg-amber-900/20 border border-amber-700/50 rounded-lg p-4 mb-6 flex items-start gap-3">
+            <i data-lucide="alert-circle" class="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5"></i>
+            <div>
+              <h3 class="text-amber-500 font-semibold mb-1">Backend Configuration</h3>
+              <p class="text-amber-200/80 text-sm">Add your Minecraft server IP and port. Traffic will be routed to this backend.</p>
+            </div>
+          </div>
+
+          <!-- Backends List -->
+          ${backends.length === 0 ? `
+          <div class="text-center py-16 text-gray-500">
+            <i data-lucide="server" class="w-16 h-16 mx-auto mb-4 text-gray-600"></i>
+            <p class="text-xl mb-2">No backends configured</p>
+            <p class="text-sm mb-4">Add a backend server to start routing traffic</p>
+            <button onclick="openModal('addBackend')" class="px-4 py-2 bg-orange-600 text-white rounded hover:bg-orange-500 transition">
+              Add Backend
+            </button>
+          </div>
+          ` : `
+          <div class="space-y-4">
+            ${backends.map(backend => `
+            <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-4">
+                  <div class="w-12 h-12 bg-orange-900/30 rounded-lg flex items-center justify-center">
+                    <i data-lucide="server" class="w-6 h-6 text-orange-400"></i>
+                  </div>
+                  <div>
+                    <h3 class="text-white font-semibold">${backend.ip}:${backend.port}</h3>
+                    <p class="text-gray-400 text-sm">ID: ${backend.id}</p>
+                    <p class="text-gray-500 text-xs">Added: ${new Date(backend.created_at).toLocaleString()}</p>
+                  </div>
+                </div>
+                <div class="flex items-center gap-3">
+                  <span class="px-3 py-1 bg-green-900/30 text-green-400 text-sm rounded-full flex items-center gap-2">
+                    <div class="w-2 h-2 bg-green-400 rounded-full"></div>
+                    Active
+                  </span>
+                  <button onclick="removeBackend('${backend.id}')" class="text-red-400 hover:text-red-300 p-2 hover:bg-zinc-800 rounded transition">
+                    <i data-lucide="trash-2" class="w-5 h-5"></i>
+                  </button>
+                </div>
+              </div>
+            </div>
+            `).join('')}
+          </div>
+          `}
+        </div>
+      </div>
+      ${modalWindows()}`;
+    }
+
+    function modalWindows() {
+        if (!state.modalType) return '';
+
+        switch(state.modalType) {
+            case 'addBackend':
+                return `
+          <div class="fixed inset-0 bg-black/80 flex items-center justify-center z-50 animate-fade-in" onclick="if(event.target === this) closeModal()">
+            <div class="bg-zinc-900 rounded-xl p-6 w-full max-w-md border border-zinc-700 shadow-2xl animate-scale-in">
+              <div class="flex items-center justify-between mb-6">
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 bg-green-900/30 rounded-lg flex items-center justify-center">
+                    <i data-lucide="server" class="w-6 h-6 text-green-400"></i>
+                  </div>
+                  <div>
+                    <h3 class="text-xl font-semibold text-white">Add Backend</h3>
+                    <p class="text-gray-400 text-sm">Add new server to ${state.editingGroup}</p>
+                  </div>
+                </div>
+                <button onclick="closeModal()" class="text-gray-400 hover:text-white hover:bg-zinc-800 p-2 rounded-lg transition">
+                  <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+              </div>
+
+              <div class="space-y-4 mb-6">
+                <div>
+                  <label class="block text-gray-300 mb-2 text-sm font-medium">Hostname/IP</label>
+                  <input id="backend-hostname" type="text" placeholder="192.168.1.100"
+                         class="w-full bg-zinc-800 text-white rounded-lg px-4 py-3 border border-zinc-700 focus:border-orange-500 focus:outline-none transition">
+                </div>
+
+                <div>
+                  <label class="block text-gray-300 mb-2 text-sm font-medium">Port</label>
+                  <input id="backend-port" type="number" placeholder="25565"
+                         class="w-full bg-zinc-800 text-white rounded-lg px-4 py-3 border border-zinc-700 focus:border-orange-500 focus:outline-none transition">
+                </div>
+              </div>
+
+              <div class="flex justify-end gap-3">
+                <button onclick="closeModal()" class="px-4 py-2.5 bg-zinc-800 text-white rounded-lg hover:bg-zinc-700 transition font-medium">
+                  Cancel
+                </button>
+                <button onclick="addBackend()" class="px-4 py-2.5 bg-orange-600 text-white rounded-lg hover:bg-orange-500 transition font-medium flex items-center gap-2">
+                  <i data-lucide="check" class="w-4 h-4"></i>
+                  Add Backend
+                </button>
+              </div>
+            </div>
+          </div>`;
+
+            case 'editGroup':
+                const group = state.backends.find(b => b.group === state.editingGroup);
+                return `
+          <div class="fixed inset-0 bg-black/80 flex items-center justify-center z-50 animate-fade-in" onclick="if(event.target === this) closeModal()">
+            <div class="bg-zinc-900 rounded-xl p-6 w-full max-w-md border border-zinc-700 shadow-2xl animate-scale-in">
+              <div class="flex items-center justify-between mb-6">
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 bg-blue-900/30 rounded-lg flex items-center justify-center">
+                    <i data-lucide="edit" class="w-6 h-6 text-blue-400"></i>
+                  </div>
+                  <div>
+                    <h3 class="text-xl font-semibold text-white">Edit Group</h3>
+                    <p class="text-gray-400 text-sm">Update backend group settings</p>
+                  </div>
+                </div>
+                <button onclick="closeModal()" class="text-gray-400 hover:text-white hover:bg-zinc-800 p-2 rounded-lg transition">
+                  <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+              </div>
+
+              <div class="space-y-4 mb-6">
+                <div>
+                  <label class="block text-gray-300 mb-2 text-sm font-medium">Group Name</label>
+                  <input id="group-name" type="text" value="${group ? group.group : ''}"
+                         class="w-full bg-zinc-800 text-white rounded-lg px-4 py-3 border border-zinc-700 focus:border-orange-500 focus:outline-none transition">
+                </div>
+
+                <div class="space-y-3">
+                  <label class="flex items-center gap-3 p-3 bg-zinc-800 rounded-lg cursor-pointer hover:bg-zinc-750 transition">
+                    <input id="enable-haproxy" type="checkbox" class="w-4 h-4 rounded bg-zinc-700 border-zinc-600 text-orange-500 focus:ring-orange-500">
+                    <div>
+                      <div class="text-white font-medium text-sm">Enable HAProxy</div>
+                      <div class="text-gray-400 text-xs">Use HAProxy PROXY protocol</div>
+                    </div>
+                  </label>
+                  <label class="flex items-center gap-3 p-3 bg-zinc-800 rounded-lg cursor-pointer hover:bg-zinc-750 transition">
+                    <input id="default-group" type="checkbox" class="w-4 h-4 rounded bg-zinc-700 border-zinc-600 text-orange-500 focus:ring-orange-500">
+                    <div>
+                      <div class="text-white font-medium text-sm">Default Group</div>
+                      <div class="text-gray-400 text-xs">Use as default backend</div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+
+              <div class="flex justify-end gap-3">
+                <button onclick="closeModal()" class="px-4 py-2.5 bg-zinc-800 text-white rounded-lg hover:bg-zinc-700 transition font-medium">
+                  Cancel
+                </button>
+                <button onclick="updateGroup()" class="px-4 py-2.5 bg-orange-600 text-white rounded-lg hover:bg-orange-500 transition font-medium flex items-center gap-2">
+                  <i data-lucide="save" class="w-4 h-4"></i>
+                  Save Changes
+                </button>
+              </div>
+            </div>
+          </div>`;
+
+            case 'deleteGroup':
+                return `
+          <div class="fixed inset-0 bg-black/80 flex items-center justify-center z-50 animate-fade-in" onclick="if(event.target === this) closeModal()">
+            <div class="bg-zinc-900 rounded-xl p-6 w-full max-w-md border border-red-900/30 shadow-2xl animate-scale-in">
+              <div class="flex items-center justify-between mb-6">
+                <div class="flex items-center gap-3">
+                  <div class="w-10 h-10 bg-red-900/30 rounded-lg flex items-center justify-center">
+                    <i data-lucide="alert-triangle" class="w-6 h-6 text-red-400"></i>
+                  </div>
+                  <div>
+                    <h3 class="text-xl font-semibold text-white">Delete Group</h3>
+                    <p class="text-gray-400 text-sm">This action cannot be undone</p>
+                  </div>
+                </div>
+                <button onclick="closeModal()" class="text-gray-400 hover:text-white hover:bg-zinc-800 p-2 rounded-lg transition">
+                  <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+              </div>
+
+              <div class="bg-red-900/20 border border-red-800/30 rounded-lg p-4 mb-6">
+                <p class="text-gray-300 text-sm">
+                  Are you sure you want to delete<br>
+                  <span class="text-white font-semibold">"${state.editingGroup}"</span>?<br><br>
+                  This will affect all backends in this group.
+                </p>
+              </div>
+
+              <div class="flex justify-end gap-3">
+                <button onclick="closeModal()" class="px-4 py-2.5 bg-zinc-800 text-white rounded-lg hover:bg-zinc-700 transition font-medium">
+                  Cancel
+                </button>
+                <button onclick="deleteGroup()" class="px-4 py-2.5 bg-red-600 text-white rounded-lg hover:bg-red-500 transition font-medium flex items-center gap-2">
+                  <i data-lucide="trash-2" class="w-4 h-4"></i>
+                  Delete Group
+                </button>
+              </div>
+            </div>
+          </div>`;
+
+            default:
+                return '';
+        }
+    }
+
+    function domainsView() {
+        const project = state.selectedProject;
+        const shieldCNAME = project?.shield_id ? `${project.shield_id}.mangoshield.fun` : 'id12345.mangoshield.fun';
+        const domain = project?.domain || '';
+        const status = project?.status || 'pending';
+
+        const statusColors = {
+            'pending': { text: 'text-gray-400', bg: 'bg-gray-400', label: 'Pending' },
+            'validating': { text: 'text-yellow-400', bg: 'bg-yellow-400', label: 'Validating' },
+            'active': { text: 'text-green-400', bg: 'bg-green-400', label: 'Active' },
+            'error': { text: 'text-red-400', bg: 'bg-red-400', label: 'Error' }
+        };
+
+        const statusStyle = statusColors[status] || statusColors['pending'];
+
+        return `
+      <div class="min-h-screen bg-black">
+        ${sidebar('domains')}
+        <div class="ml-64 p-8">
+          <div class="flex items-center justify-between mb-8">
+            <h1 class="text-3xl font-bold text-white">Domain Configuration</h1>
+          </div>
+
+          <!-- Current Project Info -->
+          ${project ? `
+          <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6 mb-6">
+            <div class="flex items-center justify-between mb-4">
+              <div>
+                <h3 class="text-xl font-semibold text-white mb-2">${project.name}</h3>
+                <p class="text-gray-400 mb-1">Shield ID: <span class="text-orange-400 font-mono">${project.shield_id}</span></p>
+                ${domain ? `
+                <p class="text-gray-400">Domain: <span class="text-white">${domain}</span></p>
+                ` : `
+                <p class="text-gray-500 text-sm">No domain configured yet</p>
+                `}
+              </div>
+              ${domain ? `
+              <span class="${statusStyle.text} text-sm flex items-center gap-2">
+                <div class="w-2 h-2 ${statusStyle.bg} rounded-full ${status === 'validating' ? 'animate-pulse' : ''}"></div> ${statusStyle.label}
+              </span>
+              ` : ''}
+            </div>
+          </div>
+          ` : ''}
+
+          <!-- Add Domain Section -->
+          ${!domain || status === 'error' ? `
+          <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6 mb-6">
+            <div class="flex items-start gap-3 mb-4">
+              <div class="p-2 bg-blue-900/30 rounded">
+                <i data-lucide="plus-circle" class="w-5 h-5 text-blue-400"></i>
+              </div>
+              <div class="flex-1">
+                <h3 class="text-white font-semibold mb-1">Add Domain</h3>
+                <p class="text-gray-400 text-sm mb-4">Enter your domain to start DNS configuration</p>
+
+                <div class="flex gap-3">
+                  <input
+                    id="domain-input"
+                    type="text"
+                    placeholder="mc.example.com"
+                    value="${domain || ''}"
+                    class="flex-1 bg-zinc-800 text-white rounded-lg px-4 py-3 border border-zinc-700 focus:border-orange-500 focus:outline-none transition"
+                  />
+                  <button
+                    onclick="addDomainToProject()"
+                    class="px-6 py-3 bg-orange-600 hover:bg-orange-500 text-white rounded-lg font-medium transition flex items-center gap-2">
+                    <i data-lucide="check" class="w-4 h-4"></i>
+                    Add Domain
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+          ` : ''}
+
+          <!-- DNS Setup Instructions -->
+          ${domain ? `
+          <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6 mb-6">
+            <div class="flex items-start gap-3 mb-4">
+              <div class="p-2 bg-orange-900/30 rounded">
+                <i data-lucide="globe" class="w-5 h-5 text-orange-400"></i>
+              </div>
+              <div>
+                <h3 class="text-white font-semibold mb-1">DNS Setup Instructions</h3>
+                <p class="text-gray-400 text-sm">Add the following CNAME record to your domain's DNS configuration:</p>
+              </div>
+            </div>
+
+            <div class="bg-zinc-800 rounded-lg overflow-hidden mb-4">
+              <table class="w-full">
+                <thead class="bg-zinc-700/30">
+                  <tr>
+                    <th class="text-left p-3 text-gray-300 text-sm font-medium">Type</th>
+                    <th class="text-left p-3 text-gray-300 text-sm font-medium">Name</th>
+                    <th class="text-left p-3 text-gray-300 text-sm font-medium">Value</th>
+                    <th class="text-left p-3 text-gray-300 text-sm font-medium">TTL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr class="border-t border-zinc-700">
+                    <td class="p-3">
+                      <span class="px-2 py-1 bg-blue-900/30 text-blue-400 text-sm rounded font-mono">CNAME</span>
+                    </td>
+                    <td class="p-3">
+                      <code class="text-white bg-zinc-900 px-2 py-1 rounded text-sm">${domain}</code>
+                    </td>
+                    <td class="p-3">
+                      <div class="flex items-center gap-2">
+                        <code class="text-orange-400 bg-zinc-900 px-2 py-1 rounded text-sm font-mono">${shieldCNAME}</code>
+                        <button onclick="navigator.clipboard.writeText('${shieldCNAME}')" class="text-gray-400 hover:text-white p-1">
+                          <i data-lucide="copy" class="w-4 h-4"></i>
+                        </button>
+                      </div>
+                    </td>
+                    <td class="p-3 text-gray-400">Auto</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="mt-4 p-4 bg-blue-900/20 border border-blue-700/50 rounded">
+              <div class="flex items-start gap-2">
+                <i data-lucide="info" class="w-5 h-5 text-blue-400 flex-shrink-0"></i>
+                <div class="text-sm text-blue-200">
+                  <p class="font-semibold mb-1">How to add CNAME record:</p>
+                  <ol class="list-decimal list-inside space-y-1 text-blue-200/80">
+                    <li>Go to your domain registrar's DNS management panel</li>
+                    <li>Add a new CNAME record</li>
+                    <li>Set the Name/Host to: <code class="bg-blue-900/30 px-1 rounded">${domain}</code></li>
+                    <li>Set the Value/Points to: <code class="bg-blue-900/30 px-1 rounded">${shieldCNAME}</code></li>
+                    <li>Save the record and wait for DNS propagation (usually 5-30 minutes)</li>
+                    <li>Click "Validate Domain" button below to verify</li>
+                  </ol>
+                </div>
+              </div>
+            </div>
+
+            ${status !== 'active' ? `
+            <div class="mt-4 flex justify-end">
+              <button
+                onclick="validateDomain()"
+                class="px-6 py-3 bg-orange-600 hover:bg-orange-500 text-white rounded-lg font-medium transition flex items-center gap-2">
+                <i data-lucide="check-circle" class="w-5 h-5"></i>
+                Validate Domain
+              </button>
+            </div>
+            ` : `
+            <div class="mt-4 bg-green-900/20 border border-green-700/50 rounded-lg p-4">
+              <div class="flex items-center gap-3">
+                <i data-lucide="check-circle" class="w-5 h-5 text-green-400"></i>
+                <div>
+                  <h3 class="text-green-400 font-semibold">Domain Validated</h3>
+                  <p class="text-green-200/80 text-sm">Your domain is configured correctly and protection is active!</p>
+                </div>
+              </div>
+            </div>
+            `}
+          </div>
+          ` : ''}
+
+          ${status === 'error' ? `
+          <div class="bg-red-900/20 border border-red-700/50 rounded-lg p-4 mb-6">
+            <div class="flex items-start gap-3">
+              <i data-lucide="alert-circle" class="w-5 h-5 text-red-400 flex-shrink-0"></i>
+              <div>
+                <h3 class="text-red-400 font-semibold mb-1">Validation Failed</h3>
+                <p class="text-red-200/80 text-sm">The CNAME record could not be verified. Please check your DNS settings and try again.</p>
+              </div>
+            </div>
+          </div>
+          ` : ''}
+        </div>
+      </div>`;
+    }
+
+    function protectionView() {
+        return `
+      <div class="min-h-screen bg-black">
+        ${sidebar('protection')}
+        <div class="ml-64 p-8">
+          <div class="flex items-center justify-between mb-8">
+            <h1 class="text-3xl font-bold text-white">Protection</h1>
+            <button class="text-gray-400 hover:text-white">Documentation</button>
+          </div>
+
+          <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6 mb-6">
+            <div class="flex items-center gap-3 mb-2">
+              <i data-lucide="shield" class="w-6 h-6 text-orange-400"></i>
+              <h3 class="text-white font-semibold">Protection</h3>
+            </div>
+            <p class="text-gray-400 text-sm">Configure protection settings for your project</p>
+          </div>
+
+          <div class="space-y-4">
+            <label class="flex items-center justify-between p-4 bg-zinc-900 rounded-lg border border-zinc-800 cursor-pointer">
+              <div>
+                <div class="flex items-center gap-2">
+                  <span class="text-white font-medium">Intelligence</span>
+                  <span class="px-2 py-1 bg-orange-900/50 text-orange-400 text-xs rounded-full">PRO</span>
+                </div>
+                <p class="text-gray-400 text-sm mt-1">Automatically detect and block malicious connections</p>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" ${state.protection.intelligence ? 'checked' : ''} onchange="toggleProtection('intelligence')">
+                <span class="slider"></span>
+              </label>
+            </label>
+
+            <label class="flex items-center justify-between p-4 bg-zinc-900 rounded-lg border border-zinc-800 cursor-pointer">
+              <div>
+                <div class="flex items-center gap-2">
+                  <span class="text-white font-medium">Intelligence Captcha</span>
+                  <span class="px-2 py-1 bg-orange-900/50 text-orange-400 text-xs rounded-full">PRO</span>
+                </div>
+                <p class="text-gray-400 text-sm mt-1">Show captcha to suspicious connections</p>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" ${state.protection.captcha ? 'checked' : ''} onchange="toggleProtection('captcha')">
+                <span class="slider"></span>
+              </label>
+            </label>
+
+            <label class="flex items-center justify-between p-4 bg-zinc-900 rounded-lg border border-zinc-800 cursor-pointer">
+              <div>
+                <div class="flex items-center gap-2">
+                  <span class="text-white font-medium">Anti Forge</span>
+                  <span class="px-2 py-1 bg-orange-900/50 text-orange-400 text-xs rounded-full">PRO</span>
+                </div>
+                <p class="text-gray-400 text-sm mt-1">Block connections from modified clients</p>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" ${state.protection.antiforge ? 'checked' : ''} onchange="toggleProtection('antiforge')">
+                <span class="slider"></span>
+              </label>
+            </label>
+
+            <label class="flex items-center justify-between p-4 bg-zinc-900 rounded-lg border border-zinc-800 cursor-pointer">
+              <div>
+                <div class="flex items-center gap-2">
+                  <span class="text-white font-medium">Raw Socket</span>
+                </div>
+                <p class="text-gray-400 text-sm mt-1">Pass traffic directly without processing</p>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" ${state.protection.rawSocket ? 'checked' : ''} onchange="toggleProtection('rawSocket')">
+                <span class="slider"></span>
+              </label>
+            </label>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    function planView() {
+        return `
+      <div class="min-h-screen bg-black">
+        ${sidebar('plan')}
+        <div class="ml-64 p-8">
+          <div class="flex items-center justify-between mb-8">
+            <h1 class="text-3xl font-bold text-white">Plan</h1>
+            <button class="text-gray-400 hover:text-white">Documentation</button>
+          </div>
+
+          <!-- Current Plan -->
+          <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6 mb-8">
+            <div class="flex items-center justify-between">
+              <div>
+                <h3 class="text-xl font-semibold text-white">Current plan: <span class="text-green-400">Free</span> <span class="px-2 py-1 bg-green-900/30 text-green-400 text-xs rounded-full">Active</span></h3>
+                <p class="text-gray-400 text-sm mt-1">Price: 0 ₽ / month • Ends: —</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Plans -->
+          <div class="grid grid-cols-3 gap-6">
+            <!-- Starter -->
+            <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6">
+              <h3 class="text-xl font-semibold text-white mb-2">Starter</h3>
+              <p class="text-gray-400 text-sm mb-4">For small servers</p>
+              <p class="text-3xl font-bold text-white mb-4">449 ₽<span class="text-sm text-gray-400">/month</span></p>
+              <ul class="space-y-2 text-gray-300 text-sm mb-6">
+                <li>• 2 domains</li>
+                <li>• 1 backend server</li>
+                <li>• 250 GB traffic</li>
+                <li>• Basic support</li>
+              </ul>
+              <button onclick="alert('Switch to Starter')" class="w-full py-2 bg-orange-600 text-white rounded hover:bg-orange-500 transition">Select</button>
+            </div>
+
+            <!-- Basic -->
+            <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6">
+              <h3 class="text-xl font-semibold text-white mb-2">Basic</h3>
+              <p class="text-gray-400 text-sm mb-4">For growing servers</p>
+              <p class="text-3xl font-bold text-white mb-4">1 899 ₽<span class="text-sm text-gray-400">/month</span></p>
+              <ul class="space-y-2 text-gray-300 text-sm mb-6">
+                <li>• 10 domains</li>
+                <li>• 2 backend servers</li>
+                <li>• 5 TB traffic</li>
+                <li>• Message customization</li>
+                <li>• Priority support</li>
+              </ul>
+              <button onclick="alert('Switch to Basic')" class="w-full py-2 bg-orange-600 text-white rounded hover:bg-orange-500 transition">Select</button>
+            </div>
+
+            <!-- Pro -->
+            <div class="bg-zinc-900 rounded-lg border border-orange-600 p-6 relative">
+              <div class="absolute top-4 right-4 px-3 py-1 bg-orange-900/50 text-orange-400 text-xs rounded-full">Recommended</div>
+              <h3 class="text-xl font-semibold text-white mb-2">Pro</h3>
+              <p class="text-gray-400 text-sm mb-4">For large servers</p>
+              <p class="text-3xl font-bold text-white mb-4">3 499 ₽<span class="text-sm text-gray-400">/month</span></p>
+              <ul class="space-y-2 text-gray-300 text-sm mb-6">
+                <li>• 20 domains</li>
+                <li>• 5 backend servers</li>
+                <li>• 10 TB traffic</li>
+                <li>• Message customization</li>
+                <li>• Anti Forge</li>
+                <li>• MangoShield Intelligence</li>
+                <li>• Wildcard domains (*example.com)</li>
+                <li>• Priority support</li>
+              </ul>
+              <button class="w-full py-2 bg-white text-black rounded hover:bg-gray-200 transition font-medium">Selected</button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    function helpView() {
+        return `
+      <div class="min-h-screen bg-black">
+        ${sidebar('help')}
+        <div class="ml-64 p-8">
+          <div class="flex items-center justify-between mb-8">
+            <h1 class="text-3xl font-bold text-white">Help</h1>
+            <button class="text-gray-400 hover:text-white">Documentation</button>
+          </div>
+
+          <!-- FAQ Section -->
+          <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6 mb-6">
+            <div class="flex items-center gap-3 mb-4">
+              <i data-lucide="help-circle" class="w-6 h-6 text-orange-400"></i>
+              <h2 class="text-xl font-semibold text-white">Frequently Asked Questions</h2>
+            </div>
+            <p class="text-gray-400 text-sm mb-6">Answers to the most common questions about our service.</p>
+
+            <div class="space-y-4">
+              <div class="p-4 bg-zinc-800 rounded-lg border border-zinc-700">
+                <h3 class="text-white font-medium mb-2">Is this service safe?</h3>
+                <p class="text-gray-400 text-sm">Yes, our service uses industry-standard security measures to protect your data and infrastructure.</p>
+              </div>
+
+              <div class="p-4 bg-zinc-800 rounded-lg border border-zinc-700">
+                <h3 class="text-white font-medium mb-2">How can I cancel my plan?</h3>
+                <p class="text-gray-400 text-sm">You can cancel your plan at any time from the Plan section in your dashboard. No long-term commitments required.</p>
+              </div>
+
+              <div class="p-4 bg-zinc-800 rounded-lg border border-zinc-700">
+                <h3 class="text-white font-medium mb-2">How does the free trial work?</h3>
+                <p class="text-gray-400 text-sm">Our free plan includes basic protection features. You can upgrade at any time to access advanced features.</p>
+              </div>
+
+              <div class="p-4 bg-zinc-800 rounded-lg border border-zinc-700">
+                <h3 class="text-white font-medium mb-2">Can I change my plan later?</h3>
+                <p class="text-gray-400 text-sm">Yes, you can upgrade or downgrade your plan at any time. Changes take effect immediately.</p>
+              </div>
+
+              <div class="p-4 bg-zinc-800 rounded-lg border border-zinc-700">
+                <h3 class="text-white font-medium mb-2">Do you offer refunds?</h3>
+                <p class="text-gray-400 text-sm">We offer refunds within 14 days of purchase for annual plans. Monthly plans can be canceled at any time.</p>
+              </div>
+
+              <div class="p-4 bg-zinc-800 rounded-lg border border-zinc-700">
+                <h3 class="text-white font-medium mb-2">Do you offer support?</h3>
+                <p class="text-gray-400 text-sm">Yes, we offer support through multiple channels including Telegram, Discord, and email. Response times vary by plan.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Contacts Section -->
+          <div class="bg-zinc-900 rounded-lg border border-zinc-800 p-6">
+            <div class="flex items-center gap-3 mb-4">
+              <i data-lucide="message-circle" class="w-6 h-6 text-orange-400"></i>
+              <h2 class="text-xl font-semibold text-white">Contacts</h2>
+            </div>
+            <p class="text-gray-400 text-sm mb-6">Get in touch with our support team through these channels.</p>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <!-- Telegram -->
+              <div class="bg-zinc-800 rounded-lg p-4 border border-zinc-700">
+                <div class="flex items-center gap-3 mb-3">
+                  <div class="w-10 h-10 bg-blue-500 rounded-lg flex items-center justify-center">
+                    <i data-lucide="send" class="w-5 h-5 text-white"></i>
+                  </div>
+                  <div>
+                    <h3 class="text-white font-medium">Telegram</h3>
+                    <p class="text-gray-400 text-sm">@mangoshield_support_bot</p>
+                  </div>
+                </div>
+                <button onclick="window.open('https://t.me/mangoshield_support_bot', '_blank')" class="w-full bg-blue-600 hover:bg-blue-500 text-white rounded py-2 font-medium transition flex items-center justify-center gap-2">
+                  <i data-lucide="external-link" class="w-4 h-4"></i>
+                  Open
+                </button>
+              </div>
+
+              <!-- Discord -->
+              <div class="bg-zinc-800 rounded-lg p-4 border border-zinc-700">
+                <div class="flex items-center gap-3 mb-3">
+                  <div class="w-10 h-10 bg-indigo-500 rounded-lg flex items-center justify-center">
+                    <i data-lucide="message-square" class="w-5 h-5 text-white"></i>
+                  </div>
+                  <div>
+                    <h3 class="text-white font-medium">Discord</h3>
+                    <p class="text-gray-400 text-sm">discord.mangoshield.io</p>
+                  </div>
+                </div>
+                <button onclick="window.open('https://discord.mangoshield.io', '_blank')" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white rounded py-2 font-medium transition flex items-center justify-center gap-2">
+                  <i data-lucide="external-link" class="w-4 h-4"></i>
+                  Open
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>`;
+    }
+</script>
+
+</body>
+</html>
