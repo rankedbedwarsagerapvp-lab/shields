@@ -16,7 +16,7 @@ import (
 
 var (
 	configPath = flag.String("config", "config.yaml", "Path to configuration file")
-	apiAddr    = flag.String("api", ":8080", "API server address")
+	apiAddr    = flag.String("api", ":80822", "API server address")
 	version    = "1.0.0"
 )
 
